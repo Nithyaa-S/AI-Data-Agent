@@ -1,0 +1,15 @@
+# Root
+.DS_Store
+*.log
+
+# Python / Backend
+backend/.venv/
+backend/__pycache__/
+backend/.pytest_cache/
+backend/.env
+backend/data/app.db
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
