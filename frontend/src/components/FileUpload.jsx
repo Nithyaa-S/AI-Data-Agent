@@ -1,7 +1,16 @@
 import React, { useState, useRef } from "react";
 import axios from "axios";
+import { API_CONFIG, getApiUrl } from "../config";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// Create an axios instance with default config
+const api = axios.create({
+  baseURL: API_CONFIG.BASE_URL,
+  timeout: 120000, // Longer timeout for file uploads
+  headers: {
+    ...API_CONFIG.HEADERS,
+    'Content-Type': 'multipart/form-data' // Will be set automatically by axios for FormData
+  }
+});
 
 export default function FileUpload({ onUploaded }) {
   const [file, setFile] = useState(null);
@@ -16,10 +25,7 @@ export default function FileUpload({ onUploaded }) {
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await axios.post(`${API}/api/upload`, form, {
-        headers: { "Content-Type": "multipart/form-data" },
-        timeout: 120000,
-      });
+      const res = await api.post(API_CONFIG.ENDPOINTS.UPLOAD, form);
       onUploaded(res.data);
     } catch (e) {
       setError(e.response?.data?.detail || e.message || "Upload failed");

@@ -1,8 +1,14 @@
 import React, { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import ChartRenderer from "./ChartRenderer";
+import { API_CONFIG, getApiUrl } from "../config";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// Create an axios instance with default config
+const api = axios.create({
+  baseURL: API_CONFIG.BASE_URL,
+  timeout: API_CONFIG.TIMEOUT,
+  headers: API_CONFIG.HEADERS
+});
 
 export default function Chat({ dataset, onAnswered }) {
   const [question, setQuestion] = useState("");
@@ -39,7 +45,7 @@ export default function Chat({ dataset, onAnswered }) {
     setQuestion("");
     setMessages((m) => [...m, { role: "user", content: q }]);
     try {
-      const res = await axios.post(`${API}/api/ask`, {
+      const res = await api.post(API_CONFIG.ENDPOINTS.ASK, {
         dataset_id: dataset.dataset_id,
         question: q,
       });
