@@ -19,7 +19,8 @@ alembic==1.13.1
 
 # AI/ML with version constraints
 openai==1.13.3
-chromadb>=0.4.24,<0.5.0
+chromadb==0.4.24
+hnswlib==0.8.0
 langchain==0.2.14
 groq==0.11.0
 sentence-transformers==2.7.0

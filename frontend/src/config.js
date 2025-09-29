@@ -2,7 +2,7 @@
 export const API_CONFIG = {
   // Use the Render backend URL in production
   // Fall back to localhost for development
-  BASE_URL: import.meta.env.VITE_API_URL || "https://ai-data-agent-4lup.onrender.com",
+  BASE_URL: import.meta.env.VITE_API_URL || "http://localhost:8000",
   
   // API endpoints
   ENDPOINTS: {

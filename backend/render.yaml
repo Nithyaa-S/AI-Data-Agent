@@ -23,6 +23,8 @@ services:
         value: False
       - key: PYTHONUNBUFFERED
         value: 1
+      - key: CHROMA_DATA_DIR
+        value: /tmp/chroma
 
 databases:
   - name: cordly-ai-db

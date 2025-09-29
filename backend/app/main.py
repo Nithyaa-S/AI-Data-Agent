@@ -121,18 +121,26 @@ async def upload_excel(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Only Excel (.xlsx/.xls/.xlsb) or CSV is supported")
 
     content = await file.read()
+    logger.info(f"Starting upload for file: {file.filename}")
+    
     dataset_id, sheet_names = ingest_excel(engine, file.filename, content)
+    logger.info(f"Ingestion complete. Dataset ID: {dataset_id}, Sheets: {sheet_names}")
 
     schema = summarize_schema(engine, dataset_id)
+    logger.info(f"Schema summary: {len(schema.get('tables', []))} tables found")
+    
     samples: Dict[str, List[Dict[str, Any]]] = {}
     for sheet in sheet_names:
         table_name = f"{dataset_id}__{sheet}"
         try:
             rows = query_sql(engine, f'SELECT * FROM "{table_name}" LIMIT 10')
-        except Exception:
+            logger.info(f"Fetched {len(rows)} sample rows for sheet '{sheet}' (table: {table_name})")
+        except Exception as e:
+            logger.error(f"Error fetching samples for {table_name}: {e}")
             rows = []
         samples[sheet] = rows
 
+    logger.info(f"Upload complete. Returning {len(sheet_names)} sheets with {sum(len(v) for v in samples.values())} total sample rows")
     return UploadResponse(dataset_id=dataset_id, sheets=sheet_names, schema=schema, samples=samples)
 
 
@@ -151,7 +159,14 @@ async def ask_question(req: AskRequest, request: Request):
     logger.info("Ask request for dataset %s: %s", req.dataset_id, (req.question or "")[:120])
     # Validate dataset exists
     try:
-        schema = summarize_schema(engine, req.dataset_id)
+        dsid = req.dataset_id or ""
+        schema = summarize_schema(engine, dsid)
+        # Fallback: allow bare ids without 'ds_' prefix
+        if not schema.get("tables") and not dsid.lower().startswith("ds_"):
+            dsid_pref = f"ds_{dsid}"
+            schema = summarize_schema(engine, dsid_pref)
+            if schema.get("tables"):
+                dsid = dsid_pref
         if not schema.get("tables"):
             raise HTTPException(status_code=404, detail="Dataset not found or has no tables")
     except HTTPException:
@@ -162,7 +177,7 @@ async def ask_question(req: AskRequest, request: Request):
 
     # Primary attempt using enhanced answer_query
     try:
-        result = answer_query(engine, req.dataset_id, req.question)
+        result = answer_query(engine, dsid, req.question)
         # Safely coerce response to fit AskResponse model
         return AskResponse(
             answer=result.get("answer", ""),
