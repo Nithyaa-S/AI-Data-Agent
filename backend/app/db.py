@@ -4,7 +4,6 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy import create_engine, text, inspect, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, Session
-from .config import settings
 
 # Optional: vector DB (Chroma)
 try:
@@ -17,31 +16,33 @@ except Exception:
 # Database session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False)
 
-def get_engine(database_url: str = None) -> Engine:
+
+def get_engine(database_url: str) -> Engine:
     """Return a SQLAlchemy engine for the given database URL.
     
     Args:
-        database_url: The database URL. If None, uses settings.DATABASE_URL
+        database_url: The database URL (e.g., 'postgresql://...' or 'sqlite:///path/to/db.sqlite')
+    
+    Returns:
+        SQLAlchemy engine instance
     """
-    if database_url is None:
-        database_url = settings.DATABASE_URL
+    if not database_url:
+        raise ValueError("database_url cannot be empty")
+    
+    # Handle Render's postgres:// URL (needs to be postgresql://)
+    if database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
     
     # SQLite specific configuration
-    if database_url and database_url.startswith('sqlite'):
-        # Handle SQLite path properly
+    if database_url.startswith('sqlite'):
+        # Ensure the directory exists for SQLite
         if database_url.startswith('sqlite:///'):
-            # For absolute paths (sqlite:////path/to/db.sqlite)
-            db_path = database_url.replace('sqlite:///', '/', 1)
-        else:
-            # For relative paths (sqlite:///./app.db)
-            db_path = database_url.replace('sqlite:///', '')
+            db_path = database_url.replace('sqlite:///', '', 1)
+            if not db_path.startswith(':memory:'):
+                db_dir = os.path.dirname(db_path)
+                if db_dir:
+                    os.makedirs(db_dir, exist_ok=True)
         
-        # Ensure the directory exists
-        db_dir = os.path.dirname(db_path)
-        if db_dir:  # Only create directory if path is not in current directory
-            os.makedirs(db_dir, exist_ok=True)
-        
-        # Use the original URL for create_engine
         engine = create_engine(
             database_url,
             connect_args={"check_same_thread": False},
@@ -54,27 +55,33 @@ def get_engine(database_url: str = None) -> Engine:
         def set_sqlite_pragma(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
     else:
         # PostgreSQL or other databases
         engine = create_engine(
             database_url,
             pool_pre_ping=True,
-            pool_size=5,  # Lower pool size for Render's free tier
+            pool_size=5,  # Conservative for free tier
             max_overflow=10,
+            pool_recycle=3600,  # Recycle connections after 1 hour
+            connect_args={
+                "connect_timeout": 10,
+                "options": "-c timezone=utc"
+            },
             future=True
         )
     
-    return engine
     return engine
 
 
 def init_db(engine: Engine) -> None:
     """Initialize DB pragmas and perform any initial migrations if required."""
-    with engine.begin() as conn:
-        # Use WAL for better concurrency
-        conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
-        conn.exec_driver_sql("PRAGMA foreign_keys=ON;")
+    # Only set pragmas for SQLite
+    if engine.url.drivername == 'sqlite':
+        with engine.begin() as conn:
+            conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON;")
 
 
 def query_sql(engine: Engine, sql: str) -> List[Dict[str, Any]]:
@@ -145,8 +152,11 @@ def _get_chroma_client():
         return _chroma_client
     if chromadb is None:
         return None
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "chroma")
+    
+    # Use /tmp for Render's ephemeral storage
+    data_dir = os.getenv("CHROMA_DATA_DIR", "/tmp/chroma")
     os.makedirs(data_dir, exist_ok=True)
+    
     try:
         _chroma_client = chromadb.PersistentClient(path=data_dir)
     except Exception:

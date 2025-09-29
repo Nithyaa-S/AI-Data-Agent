@@ -16,12 +16,14 @@ logger = logging.getLogger("cordly_ai")
 
 app = FastAPI(title="Cordly AI - Excel Conversational Analytics", version="0.2.0")
 
-# CORS - include common dev ports (Vite/CRA)
+# CORS - include production domains
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://agentdata.netlify.app",
+    "https://*.netlify.app",  # Allow all Netlify subdomains
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -31,35 +33,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Data dir & DB
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-DB_PATH = os.path.join(DATA_DIR, "app.db")
-
-# Attempt to load .env-style settings into os.environ (pydantic optional)
+# Load settings from environment
 try:
     from pydantic_settings import BaseSettings
 
     class Settings(BaseSettings):
+        DATABASE_URL: str | None = None
         GROQ_API_KEY: str | None = None
-        GROQ_MODEL: str = "llama-3.1-70b-versatile"
+        GROQ_MODEL: str = "llama-3.3-70b-versatile"
         OPENAI_API_KEY: str | None = None
         OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
         SENTENCE_TRANSFORMERS_MODEL: str = "all-MiniLM-L6-v2"
 
         class Config:
-            env_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+            env_file = ".env"
+            env_file_encoding = "utf-8"
 
     _settings = Settings()
     for k, v in _settings.model_dump().items():
         if v is not None and os.getenv(k) is None:
             os.environ[k] = str(v)
-except Exception:
-    pass
+except Exception as e:
+    logger.warning(f"Could not load settings: {e}")
+
+# Get database URL from environment or use SQLite fallback
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    # Fallback to SQLite for local development
+    DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    DB_PATH = os.path.join(DATA_DIR, "app.db")
+    DATABASE_URL = f"sqlite:///{DB_PATH}"
+    logger.info(f"Using SQLite database at: {DB_PATH}")
+else:
+    logger.info(f"Using database from DATABASE_URL: {DATABASE_URL[:20]}...")
 
 # DB engine & init
-engine = get_engine(DB_PATH)
-init_db(engine)
+try:
+    engine = get_engine(DATABASE_URL)
+    init_db(engine)
+    logger.info("Database initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize database: {e}")
+    raise
 
 # NL engine
 nl_engine = NLQueryEngine()
@@ -87,6 +104,11 @@ class AskResponse(BaseModel):
 
 
 # Endpoints ----------------------------------------------------------
+@app.get("/")
+def root():
+    return {"message": "Cordly AI API is running", "status": "ok"}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}

@@ -4,7 +4,7 @@ import re
 import uuid
 from typing import List, Tuple, Dict, Any
 import pandas as pd
-from sqlalchemy import Table, Column, MetaData, String, Float, Integer, DateTime
+from sqlalchemy import Table, Column, MetaData, String, Float, Integer, DateTime, TEXT
 from sqlalchemy.engine import Engine
 import os
 from .db import store_documents
@@ -28,7 +28,8 @@ def _infer_sqlalchemy_type(series: pd.Series):
         return Float
     if pd.api.types.is_datetime64_any_dtype(series):
         return DateTime
-    return String
+    # Use TEXT for PostgreSQL compatibility (no length limit)
+    return TEXT
 
 
 def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -129,6 +130,9 @@ def ingest_excel(engine: Engine, filename: str, content: bytes) -> Tuple[str, Li
     metadatas: List[Dict[str, Any]] = []
     ids: List[str] = []
 
+    # Check if using PostgreSQL
+    is_postgres = engine.url.drivername == 'postgresql'
+
     with engine.begin() as conn:
         for sheet in xls.sheet_names:
             try:
@@ -145,10 +149,17 @@ def ingest_excel(engine: Engine, filename: str, content: bytes) -> Tuple[str, Li
             # define columns for SQLAlchemy Table
             cols = []
             for name in df.columns:
-                col_type = _infer_sqlalchemy_type(df[name]) if name in df.columns else String
+                col_type = _infer_sqlalchemy_type(df[name]) if name in df.columns else TEXT
                 cols.append(Column(name, col_type))
+            
             table_name = f"{dataset_id}__{_slugify(sheet) or 'sheet'}"
+            
+            # For PostgreSQL, use lowercase table names
+            if is_postgres:
+                table_name = table_name.lower()
+            
             table = Table(table_name, meta, *cols)
+            
             # drop/create for idempotency
             try:
                 table.drop(bind=conn, checkfirst=True)
@@ -159,15 +170,32 @@ def ingest_excel(engine: Engine, filename: str, content: bytes) -> Tuple[str, Li
             except Exception:
                 pass
 
-            # write rows using pandas to_sql (use connection)
+            # write rows using pandas to_sql
             if not df.empty:
                 try:
-                    # pandas to_sql handles dtype conversion; pass if_exists='append'
-                    df.to_sql(table_name, con=conn, if_exists="append", index=False)
-                except Exception:
-                    # as a fallback, try using engine directly
+                    # For PostgreSQL, we need to handle the connection differently
+                    df.to_sql(
+                        table_name, 
+                        con=conn, 
+                        if_exists="append", 
+                        index=False,
+                        method='multi',  # Faster bulk inserts
+                        chunksize=1000  # Insert in chunks
+                    )
+                except Exception as e:
+                    # Fallback: try row by row insertion
+                    print(f"Bulk insert failed for {table_name}, trying row by row: {e}")
                     try:
-                        df.to_sql(table_name, con=engine, if_exists="append", index=False)
+                        for _, row in df.iterrows():
+                            try:
+                                pd.DataFrame([row]).to_sql(
+                                    table_name, 
+                                    con=conn, 
+                                    if_exists="append", 
+                                    index=False
+                                )
+                            except Exception:
+                                continue
                     except Exception:
                         pass
 

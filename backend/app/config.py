@@ -1,50 +1,36 @@
-from pydantic import PostgresDsn, validator, AnyHttpUrl
-from pydantic_settings import BaseSettings
-from typing import Optional, Union
+from __future__ import annotations
 import os
+from pydantic_settings import BaseSettings
+from typing import Optional
+
 
 class Settings(BaseSettings):
-    # Database settings - use environment variable if available, otherwise default to SQLite
-    DATABASE_URL: str = "sqlite:///./app.db"
-    TEST_DATABASE_URL: str = "sqlite:///./test.db"
+    """Application settings loaded from environment variables."""
     
-    # For production PostgreSQL
-    POSTGRES_USER: Optional[str] = None
-    POSTGRES_PASSWORD: Optional[str] = None
-    POSTGRES_DB: Optional[str] = None
-    POSTGRES_HOST: Optional[str] = None
-    POSTGRES_PORT: Optional[str] = "5432"
+    # Database
+    DATABASE_URL: str = "sqlite:///./data/app.db"
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    # API Keys
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     
-    # Construct the DATABASE_URL from environment variables if not provided
-    @validator("DATABASE_URL", pre=True)
-    def assemble_db_connection(cls, v: Optional[str], values: dict) -> str:
-        if isinstance(v, str) and v:
-            # If DATABASE_URL is explicitly set, use it
-            return v
-            
-        # Check for Render's PostgreSQL URL first
-        if "DATABASE_URL" in os.environ:
-            return os.environ["DATABASE_URL"]
-            
-        # If DATABASE_URL is not set, try to construct it from PostgreSQL env vars
-        user = values.get("POSTGRES_USER")
-        password = values.get("POSTGRES_PASSWORD")
-        host = values.get("POSTGRES_HOST")
-        port = values.get("POSTGRES_PORT", "5432")
-        db = values.get("POSTGRES_DB")
-        
-        if all([user, password, host, db]):
-            return f"postgresql://{user}:{password}@{host}:{port}/{db}"
-            
-        # Fall back to SQLite if PostgreSQL config is incomplete
-        return "sqlite:///./app.db"
+    # Sentence Transformers
+    SENTENCE_TRANSFORMERS_MODEL: str = "all-MiniLM-L6-v2"
+    
+    # Chroma Storage
+    CHROMA_DATA_DIR: str = "/tmp/chroma"
+    
+    # Environment
+    ENVIRONMENT: str = "development"
+    DEBUG: bool = False
     
     class Config:
         env_file = ".env"
+        env_file_encoding = "utf-8"
         case_sensitive = True
 
+
+# Create global settings instance
 settings = Settings()
