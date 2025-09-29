@@ -114,37 +114,96 @@ def safe_select(engine: Engine, sql: str) -> List[Dict[str, Any]]:
     # If it passes basic checks, run it
     return query_sql(engine, sql)
 
-
 def summarize_schema(engine: Engine, dataset_id: str) -> Dict[str, Any]:
     """
     Inspect tables belonging to dataset_id and return structured schema info.
     Tables created by ingest are named <dataset_id>__<sheetname>.
+    Handles both SQLite and PostgreSQL case sensitivity.
     """
-    insp = inspect(engine)
-    all_tables = insp.get_table_names()
-    tables = [t for t in all_tables if t.startswith(f"{dataset_id}__")]
-    summary: Dict[str, Any] = {"dataset_id": dataset_id, "tables": []}
-    with engine.begin() as conn:
-        for t in tables:
-            cols = []
-            for col in insp.get_columns(t):
-                cols.append({
+    inspector = inspect(engine)
+    is_postgres = engine.url.drivername == 'postgresql'
+    
+    # Handle case sensitivity for different databases
+    if is_postgres:
+        # For PostgreSQL, we need to use a case-insensitive query
+        with engine.connect() as conn:
+            result = conn.execute(text(
+                """
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND LOWER(table_name) LIKE :prefix
+                """),
+                {"prefix": f"{dataset_id.lower()}__%"}
+            )
+            tables = [row[0] for row in result]
+    else:
+        # For SQLite, we can use the inspector directly
+        all_tables = inspector.get_table_names()
+        prefix = f"{dataset_id}__"
+        tables = [t for t in all_tables if t.lower().startswith(prefix.lower())]
+    
+    schema = {"tables": [], "database_type": engine.url.drivername}
+    
+    for table_name in tables:
+        columns = []
+        try:
+            # Get columns with proper case handling
+            cols = inspector.get_columns(table_name)
+            for col in cols:
+                columns.append({
                     "name": col["name"],
-                    "type": str(col["type"]),
-                    "nullable": col.get("nullable", True)
+                    "type": str(col["type"].__visit_name__) if hasattr(col["type"], "__visit_name__") else str(col["type"]),
+                    "nullable": col.get("nullable", True),
+                    "default": str(col.get("default", "")) if col.get("default") is not None else None,
                 })
+            
+            # Get a sample of the data with proper quoting
+            sample = []
             try:
-                count = conn.execute(text(f'SELECT COUNT(*) as c FROM "{t}"')).scalar_one()
-            except Exception:
-                count = 0
-            summary["tables"].append({"name": t, "row_count": int(count), "columns": cols})
-    return summary
+                with engine.connect() as conn:
+                    # Handle case sensitivity in table names for different databases
+                    quoted_table = f'"{table_name}"' if is_postgres else f'"{table_name}"'
+                    result = conn.execute(text(f'SELECT * FROM {quoted_table} LIMIT 5'))
+                    sample = [dict(row._mapping) for row in result]
+            except Exception as e:
+                logger.warning(f"Could not sample {table_name}: {e}")
+                sample = []
+            
+            schema["tables"].append({
+                "name": table_name,
+                "columns": columns,
+                "sample": sample,
+                "row_count": _get_table_row_count(engine, table_name)
+            })
+            
+        except Exception as e:
+            logger.error(f"Error processing table {table_name}: {str(e)}")
+            continue
+    
+    return schema
+
+
+def _get_table_row_count(engine: Engine, table_name: str) -> int:
+    """Get the number of rows in a table."""
+    try:
+        with engine.connect() as conn:
+            if engine.url.drivername == 'postgresql':
+                # PostgreSQL specific query
+                result = conn.execute(text(f'SELECT COUNT(*) FROM \"{table_name}\"'))
+            else:
+                # SQLite and other databases
+                result = conn.execute(text(f'SELECT COUNT(*) FROM "{table_name}"'))
+            return result.scalar() or 0
+    except Exception as e:
+        logger.warning(f"Could not get row count for {table_name}: {e}")
+        return 0
 
 
 # --------------------- Chroma helpers (optional) ---------------------
 _chroma_client = None
 
-
+{{ ... }}
 def _get_chroma_client():
     """Return a persistent chroma client if available, else None."""
     global _chroma_client
