@@ -1,14 +1,11 @@
---only-binary=:all:
---prefer-binary
-
 # Core dependencies
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 gunicorn==21.2.0
 
-# Data processing
-pandas>=2.2.0
-numpy>=1.26.0
+# Data processing with specific versions to avoid conflicts
+pandas>=2.2.0,<2.3.0
+numpy>=1.26.0,<2.0.0
 openpyxl==3.1.5
 xlrd==2.0.1
 pyxlsb==1.0.10
@@ -16,13 +13,13 @@ pyxlsb==1.0.10
 # Database
 sqlalchemy==2.0.35
 aiosqlite==0.20.0
-psycopg2-binary>=2.9.10  # Updated for Python 3.13 compatibility
+psycopg2-binary>=2.9.10,<3.0.0
 sqlalchemy-utils==0.41.1
 alembic==1.13.1
 
-# AI/ML
+# AI/ML with version constraints
 openai==1.13.3
-chromadb>=0.4.24,<0.5.0  # Updated version with better Python 3.13 support
+chromadb>=0.4.24,<0.5.0
 langchain==0.2.14
 groq==0.11.0
 sentence-transformers==2.7.0
@@ -33,3 +30,7 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 httpx==0.27.2
 python-dotenv==1.0.1
+
+# Explicitly add dependencies that might be missing
+typing-extensions>=4.0.0,<5.0.0
+requests>=2.31.0,<3.0.0
