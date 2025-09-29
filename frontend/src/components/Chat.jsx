@@ -4,13 +4,30 @@ import ChartRenderer from "./ChartRenderer";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-export default function Chat({ dataset }) {
+export default function Chat({ dataset, onAnswered }) {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]); // {role, content, data?, error?}
   const [loading, setLoading] = useState(false);
   const chatEndRef = useRef(null);
+  const onAnsweredRef = useRef(onAnswered);
 
-  // Auto-scroll
+  // keep ref updated when prop changes
+  useEffect(() => {
+    onAnsweredRef.current = onAnswered;
+  }, [onAnswered]);
+
+
+  // Listen to history selection to prefill input
+  useEffect(() => {
+    const handler = (e) => {
+      const q = e?.detail;
+      if (typeof q === "string" && q.trim()) setQuestion(q);
+    };
+    window.addEventListener("ask-query", handler);
+    return () => window.removeEventListener("ask-query", handler);
+  }, []);
+
+  // Auto-scroll to bottom
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
@@ -22,9 +39,14 @@ export default function Chat({ dataset }) {
     setQuestion("");
     setMessages((m) => [...m, { role: "user", content: q }]);
     try {
-      const res = await axios.post(`${API}/api/ask`, { dataset_id: dataset.dataset_id, question: q });
-      const payload = res.data || {};
-      setMessages((m) => [...m, { role: "assistant", content: payload.answer || "No answer", data: payload }]);
+      const res = await axios.post(`${API}/api/ask`, {
+        dataset_id: dataset.dataset_id,
+        question: q,
+      });
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: res.data.answer, data: res.data },
+      ]);
     } catch (err) {
       const msg = err.response?.data?.detail || err.response?.data?.answer || err.message || "Unknown error";
       setMessages((m) => [...m, { role: "assistant", content: msg, error: true }]);

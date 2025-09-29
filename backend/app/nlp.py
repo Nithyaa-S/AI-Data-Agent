@@ -206,58 +206,109 @@ def _simple_filter_sql(question: str, schema: Dict[str, Any]) -> Tuple[str, Dict
     """
     if not question:
         return "", {}
+
+
+def _calculate_total_revenue(question: str, table: str, cols: List[str]) -> Tuple[str, Dict[str, Any]]:
+    """Handle total revenue calculation by multiplying price and quantity columns."""
+    q = question.lower()
+    if "total revenue" not in q and "total sales" not in q and not ("price" in q and "quantity" in q):
+        return "", {}
+        
+    price_col = next((c for c in cols if "price" in c.lower()), None)
+    qty_col = next((c for c in cols if any(x in c.lower() for x in ["quantity", "qty"])), None)
+    
+    if not price_col or not qty_col:
+        return "", {}
+        
+    sql = f"""
+    SELECT 
+        SUM(CAST(REPLACE(REPLACE("{price_col}", '$', ''), ',', '') AS REAL) * 
+             CAST(REPLACE(REPLACE("{qty_col}", '$', ''), ',', '') AS REAL)) 
+        AS total_revenue 
+    FROM "{table}"
+    """
+    
+    return sql.strip(), {"detected": "total_revenue", "price_col": price_col, "qty_col": qty_col}
+
+def _top_n_sql(question: str, schema: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """
+    Detect patterns like "top 5 <entities> by <metric>" or "bottom 10 ... by ..." and build a SQL with
+    GROUP BY <entity> and ORDER BY aggregated <metric> with LIMIT N.
+    Only targets the first table for simplicity.
+    """
+    if not question:
+        return "", {}
+        
     table, cols = _first_table_and_columns(schema)
     if not table or not cols:
         return "", {}
 
+    # First check if this is a total revenue calculation
+    rev_sql, rev_meta = _calculate_total_revenue(question, table, cols)
+    if rev_sql:
+        return rev_sql, rev_meta
+
+    q = question.lower()
+    m = re.search(r"\b(top|bottom)\s+(\d+)\b", q)
+    if not m:
+        return "", {}
+    direction, n_str = m.group(1), m.group(2)
+    try:
+        n = max(1, min(1000, int(n_str)))
+    except Exception:
+        n = 5
+
+    # Try to find metric after "by <metric>"
+    metric_match = re.search(r"\bby\s+([a-zA-Z0-9_ ]+)", question, re.IGNORECASE)
+    metric_raw = metric_match.group(1).strip() if metric_match else ""
+
     norm_map = {_norm(c): c for c in cols}
-    ql = question.strip()
+    metric_col = None
+    if metric_raw:
+        # choose the column in schema that best matches metric_raw
+        mr = _norm(metric_raw)
+        # look for exact or substring matches
+        for k, orig in norm_map.items():
+            if mr == k or mr in k or k in mr:
+                metric_col = orig
+                break
+    # fallback: common metric names
+    if not metric_col:
+        for hint in ["profit", "revenue", "sales", "amount", "quantity"]:
+            for c in cols:
+                if hint in _norm(c):
+                    metric_col = c
+                    break
+            if metric_col:
+                break
+    if not metric_col:
+        return "", {}
 
-    # 1) Exact-id pattern: capture a large integer and a nearby column token present in cols
-    # Example: "details of 2605000446 orderid" or "orderid 2605000446"
-    tokens = re.findall(r"[\w'-]+", ql)
-    numbers = [t for t in tokens if t.isdigit()]
-    if numbers:
-        # search for a column-like token in the same question
-        for t in tokens:
-            n = _norm(t)
-            if n in norm_map:
-                col = norm_map[n]
-                # Use the first number hit
-                val = numbers[0]
-                # Prefer quoting column and using parameterless safe_select (already sanitized by safe_select)
-                sql = f'SELECT * FROM "{table}" WHERE "{col}" = {val} LIMIT 200'
-                return sql, {"detected": "id_filter", "column": col, "value": val}
+    # pick an entity column to group by: prefer product/item/category/customer
+    group_col = None
+    for hint in ["product", "item", "category", "customer", "region", "name"]:
+        for c in cols:
+            if hint in _norm(c) and c != metric_col:
+                group_col = c
+                break
+        if group_col:
+            break
+    # fallback: first non-metric text-like column
+    if not group_col:
+        for c in cols:
+            if c != metric_col and not ("id" in _norm(c)):
+                group_col = c
+                break
+    if not group_col:
+        return "", {}
 
-    # 2) Region/state-like filters: look for quoted or title-cased multiword (e.g., Madhya Pradesh)
-    # We will try to find a likely geo column in the schema first
-    geo_hints = ["state", "region", "province", "location", "city"]
-    geo_cols = [c for c in cols if any(h in _norm(c) for h in geo_hints)]
-    if geo_cols:
-        # Try to extract a location phrase
-        # Heuristic: longest capitalized phrase or quoted string
-        m = re.search(r'"([^"]+)"|\'([^\']+)\'', ql)
-        place = None
-        if m:
-            place = m.group(1) or m.group(2)
-        else:
-            # find consecutive TitleCase tokens
-            groups: List[str] = []
-            cur: List[str] = []
-            for t in tokens:
-                if len(t) > 2 and t[0].isupper() and any(ch.islower() for ch in t[1:]):
-                    cur.append(t)
-                else:
-                    if cur:
-                        groups.append(" ".join(cur))
-                        cur = []
-            if cur:
-                groups.append(" ".join(cur))
-            place = max(groups, key=len) if groups else None
-        if place:
-            col = geo_cols[0]
-            sql = f'SELECT * FROM "{table}" WHERE "{col}" LIKE "%{place}%" LIMIT 200'
-            return sql, {"detected": "geo_filter", "column": col, "value": place}
+    agg = f'SUM("{metric_col}")'
+    order = "ASC" if direction == "bottom" else "DESC"
+    sql = (
+        f'SELECT "{group_col}" AS label, {agg} AS value '\
+        f'FROM "{table}" GROUP BY "{group_col}" ORDER BY value {order} LIMIT {n}'
+    )
+    return sql, {"detected": "top_n", "n": n, "metric": metric_col, "group": group_col, "direction": direction}
 
     return "", {}
 
@@ -272,7 +323,25 @@ def answer_query(engine, dataset_id: str, question: str) -> Dict[str, Any]:
 
     schema = summarize_schema(engine, dataset_id)
 
-    # First, try a deterministic rule-based filter for common intents (id/geo filters)
+    # First, try ranking detector: top/bottom N by <metric>
+    top_sql, top_meta = _top_n_sql(question, schema)
+    if top_sql:
+        try:
+            rows = safe_select(engine, top_sql)
+            chart_data, chart_type = _package_chart_data(rows)
+            result: Dict[str, Any] = {
+                "answer": "Here are the results.",
+                "sql": top_sql,
+            }
+            if rows:
+                result["table"] = {"columns": list(rows[0].keys()), "rows": rows}
+            if chart_data:
+                result["chart"] = {"type": chart_type or "bar", "chart_data": chart_data}
+            return result
+        except Exception:
+            pass
+
+    # Next, try a deterministic rule-based filter for common intents (id/geo filters)
     simple_sql, meta = _simple_filter_sql(question, schema)
     if simple_sql:
         try:
