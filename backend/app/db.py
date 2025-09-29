@@ -1,8 +1,10 @@
 from __future__ import annotations
 import os
 from typing import Dict, Any, List, Optional
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine, text, inspect, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import sessionmaker, Session
+from .config import settings
 
 # Optional: vector DB (Chroma)
 try:
@@ -12,12 +14,49 @@ except Exception:
     chromadb = None
     embedding_functions = None
 
+# Database session factory
+SessionLocal = sessionmaker(autocommit=False, autoflush=False)
 
-def get_engine(db_path: str) -> Engine:
-    """Return a SQLAlchemy engine for SQLite path."""
-    # sqlite needs check_same_thread for some setups, but SQLAlchemy manages connections:
-    url = f"sqlite:///{db_path}"
-    engine = create_engine(url, future=True)
+def get_engine(database_url: str = None) -> Engine:
+    """Return a SQLAlchemy engine for the given database URL.
+    
+    Args:
+        database_url: The database URL. If None, uses settings.DATABASE_URL
+    """
+    if database_url is None:
+        database_url = settings.DATABASE_URL
+    
+    # SQLite specific configuration
+    if database_url.startswith('sqlite'):
+        # Remove sqlite:/// prefix to get the path
+        db_path = database_url.replace('sqlite:///', '')
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
+        
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False},
+            pool_pre_ping=True,
+            future=True
+        )
+        
+        # Enable WAL mode for better concurrency
+        @event.listens_for(engine, 'connect')
+        def set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.close()
+    else:
+        # PostgreSQL or other databases
+        engine = create_engine(
+            database_url,
+            pool_pre_ping=True,
+            pool_size=20,  # Adjust based on your needs
+            max_overflow=10,
+            future=True
+        )
+    
+    return engine
     return engine
 
 
