@@ -27,12 +27,21 @@ def get_engine(database_url: str = None) -> Engine:
         database_url = settings.DATABASE_URL
     
     # SQLite specific configuration
-    if database_url.startswith('sqlite'):
-        # Remove sqlite:/// prefix to get the path
-        db_path = database_url.replace('sqlite:///', '')
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
+    if database_url and database_url.startswith('sqlite'):
+        # Handle SQLite path properly
+        if database_url.startswith('sqlite:///'):
+            # For absolute paths (sqlite:////path/to/db.sqlite)
+            db_path = database_url.replace('sqlite:///', '/', 1)
+        else:
+            # For relative paths (sqlite:///./app.db)
+            db_path = database_url.replace('sqlite:///', '')
         
+        # Ensure the directory exists
+        db_dir = os.path.dirname(db_path)
+        if db_dir:  # Only create directory if path is not in current directory
+            os.makedirs(db_dir, exist_ok=True)
+        
+        # Use the original URL for create_engine
         engine = create_engine(
             database_url,
             connect_args={"check_same_thread": False},
@@ -51,7 +60,7 @@ def get_engine(database_url: str = None) -> Engine:
         engine = create_engine(
             database_url,
             pool_pre_ping=True,
-            pool_size=20,  # Adjust based on your needs
+            pool_size=5,  # Lower pool size for Render's free tier
             max_overflow=10,
             future=True
         )
