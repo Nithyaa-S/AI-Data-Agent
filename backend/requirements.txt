@@ -1,7 +1,11 @@
+--only-binary=:all:
+--prefer-binary
+
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 gunicorn==21.2.0
-pandas==2.2.2
+pandas==2.2.2; python_version < '3.13' and platform_machine != 'aarch64'
+numpy==1.26.4  # Explicit version to prevent build issues
 openpyxl==3.1.5
 xlrd==1.2.0
 pyxlsb==1.0.10
