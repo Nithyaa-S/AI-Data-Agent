@@ -16,18 +16,18 @@ logger = logging.getLogger("cordly_ai")
 
 app = FastAPI(title="Cordly AI - Excel Conversational Analytics", version="0.2.0")
 
-# CORS - include production domains
+# CORS - include production domains (no wildcard in allow_origins; use regex instead)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://agentdata.netlify.app",
-    "https://*.netlify.app",  # Allow all Netlify subdomains
 ]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.netlify\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -220,6 +220,9 @@ def _get_chroma_client():
 
 def _get_embedding_fn():
     """Return an embedding function for Chroma, preferring cloud keys if present."""
+    # Allow disabling embeddings entirely in production to avoid heavy model downloads
+    if os.getenv("DISABLE_EMBEDDINGS", "").lower() in {"1", "true", "yes"}:
+        return None
     if embedding_functions is None:
         return None
     api_key = os.getenv("OPENAI_API_KEY")
