@@ -71,11 +71,19 @@ def get_engine(database_url: str = None) -> Engine:
 
 
 def init_db(engine: Engine) -> None:
-    """Initialize DB pragmas and perform any initial migrations if required."""
-    with engine.begin() as conn:
-        # Use WAL for better concurrency
-        conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
-        conn.exec_driver_sql("PRAGMA foreign_keys=ON;")
+    """Initialize DB pragmas and perform any initial migrations if required.
+    Only run PRAGMA statements for SQLite engines.
+    """
+    try:
+        if engine.url.drivername.startswith("sqlite"):
+            with engine.begin() as conn:
+                conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+                conn.exec_driver_sql("PRAGMA foreign_keys=ON;")
+        else:
+            # No-op for Postgres/others
+            return
+    except Exception as e:
+        logger.warning(f"init_db skipped pragmas: {e}")
 
 
 def query_sql(engine: Engine, sql: str) -> List[Dict[str, Any]]:
