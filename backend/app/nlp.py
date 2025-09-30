@@ -186,14 +186,33 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
 
 
-def _first_table_and_columns(schema: Dict[str, Any]) -> Tuple[str, List[str]]:
+def _select_best_table(schema: Dict[str, Any], question: str) -> Tuple[str, List[str]]:
+    """Pick the table whose columns best match the question terms.
+    If no overlap, return the first table.
+    """
     tables = schema.get("tables", [])
     if not tables:
         return "", []
-    t = tables[0]
-    table = t["name"]
-    cols = [c["name"] for c in t.get("columns", [])]
-    return table, cols
+    # tokenize question
+    q = (question or "").lower()
+    q_tokens = set(re.findall(r"[a-z0-9]+", q))
+    best = None
+    best_score = -1
+    for t in tables:
+        cols = [c["name"] for c in t.get("columns", [])]
+        score = 0
+        for c in cols:
+            cn = _norm(c)
+            # increment if any token is substring of column name
+            score += sum(1 for tok in q_tokens if tok and tok in cn)
+        # small bonus if table name matches
+        if any(tok in _norm(t["name"]) for tok in q_tokens):
+            score += 1
+        if score > best_score:
+            best = t
+            best_score = score
+    target = best or tables[0]
+    return target["name"], [c["name"] for c in target.get("columns", [])]
 
 
 def _simple_filter_sql(question: str, schema: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -206,7 +225,83 @@ def _simple_filter_sql(question: str, schema: Dict[str, Any]) -> Tuple[str, Dict
     """
     if not question:
         return "", {}
+    table, cols = _select_best_table(schema, question)
+    if not table or not cols:
+        return "", {}
 
+    q = question.strip()
+    ql = q.lower()
+
+    # 1) Try to detect an ID value (numeric or quoted string)
+    id_value: str | None = None
+    id_is_string = False
+    # quoted token "..."
+    m_q = re.search(r'"([^"]+)"', q) or re.search(r"'([^']+)'", q)
+    if m_q:
+        id_value = m_q.group(1)
+        id_is_string = True
+    else:
+        # bare number
+        m_n = re.search(r"\b(\d{2,})\b", q)  # 2+ digit number
+        if m_n:
+            id_value = m_n.group(1)
+
+    # Candidate id columns ranked by relevance
+    id_col_hints = [
+        "orderid", "order_id", "order id",
+        "customerid", "customer_id", "customer id",
+        "productid", "product_id", "product id",
+        "id"
+    ]
+    norm_cols = { _norm(c): c for c in cols }
+
+    def pick_best_id_column() -> str:
+        # prefer an id column whose hint appears in the question, else general 'id'
+        for hint in id_col_hints:
+            if hint in ql:
+                # find closest column name
+                for k, orig in norm_cols.items():
+                    if hint.replace(" ", "") in k:
+                        return orig
+        # fallback: any column that ends with 'id'
+        for k, orig in norm_cols.items():
+            if k.endswith("id"):
+                return orig
+        return ""
+
+    # If we have an id value and some id-like column, build a simple filter
+    if id_value is not None:
+        col = pick_best_id_column()
+        if col:
+            if id_is_string:
+                sql = f'SELECT * FROM "{table}" WHERE "{col}" = :val LIMIT 50'
+                # use literal formatting because safe_select doesn't accept params; sanitize quotes
+                safe_val = id_value.replace("\"", "").replace("'", "")
+                sql = sql.replace(":val", f"'{safe_val}'")
+            else:
+                sql = f'SELECT * FROM "{table}" WHERE "{col}" = {id_value} LIMIT 50'
+            return sql, {"detected": "id_filter", "column": col, "value": id_value}
+
+    # 2) Geo/text contains filter (state/region/city/country)
+    geo_hints = ["state", "region", "city", "country", "area", "province", "location"]
+    geo_value = None
+    # try to grab last capitalized phrase as location-like token
+    tokens = re.findall(r"[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*", q)
+    if tokens:
+        geo_value = tokens[-1]
+    if geo_value:
+        for c in cols:
+            cn = _norm(c)
+            if any(h in cn for h in geo_hints):
+                like = geo_value.replace("'", "")
+                # case-insensitive across SQLite/Postgres
+                sql = (
+                    f'SELECT * FROM "{table}" '
+                    f'WHERE LOWER("{c}") LIKE LOWER('\'%{like}%\'') LIMIT 100'
+                )
+                return sql, {"detected": "geo_filter", "column": c, "value": geo_value}
+
+    return "", {}
 
 def _calculate_total_revenue(question: str, table: str, cols: List[str]) -> Tuple[str, Dict[str, Any]]:
     """Handle total revenue calculation by multiplying price and quantity columns."""
@@ -239,7 +334,7 @@ def _top_n_sql(question: str, schema: Dict[str, Any]) -> Tuple[str, Dict[str, An
     if not question:
         return "", {}
         
-    table, cols = _first_table_and_columns(schema)
+    table, cols = _select_best_table(schema, question)
     if not table or not cols:
         return "", {}
 
@@ -312,6 +407,72 @@ def _top_n_sql(question: str, schema: Dict[str, Any]) -> Tuple[str, Dict[str, An
 
     return "", {}
 
+def _max_min_row_sql(question: str, schema: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Detect questions like 'which order has the highest price' or 'lowest profit row'.
+    Returns a SELECT * ORDER BY <metric> DESC/ASC LIMIT 1.
+    """
+    if not question:
+        return "", {}
+    table, cols = _first_table_and_columns(schema)
+    if not table or not cols:
+        return "", {}
+    q = question.lower()
+    direction = None
+    if any(k in q for k in ["highest", "max", "maximum", "top"]):
+        direction = "DESC"
+    elif any(k in q for k in ["lowest", "min", "minimum", "bottom"]):
+        direction = "ASC"
+    if not direction:
+        return "", {}
+    # detect metric
+    norm_cols = {_norm(c): c for c in cols}
+    metric_hints = ["price", "profit", "revenue", "amount", "quantity", "total"]
+    metric_col = None
+    for hint in metric_hints:
+        for k, orig in norm_cols.items():
+            if hint in k:
+                metric_col = orig
+                break
+        if metric_col:
+            break
+    if not metric_col:
+        return "", {}
+    sql = f'SELECT * FROM "{table}" ORDER BY "{metric_col}" {direction} LIMIT 1'
+    return sql, {"detected": "max_min_row", "metric": metric_col, "direction": direction}
+
+def _equality_filter_sql(question: str, schema: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Detect simple equality filters like product/customer/category equals a given value.
+    Examples: 'orders for customer "Alice"', 'products of category Electronics'
+    """
+    if not question:
+        return "", {}
+    table, cols = _first_table_and_columns(schema)
+    if not table or not cols:
+        return "", {}
+    q = question.strip()
+    value = None
+    m_q = re.search(r'"([^"]+)"', q) or re.search(r"'([^']+)'", q)
+    if m_q:
+        value = m_q.group(1)
+    # entity columns to try
+    entity_hints = ["product", "customer", "category", "name", "region", "city"]
+    targets = []
+    for c in cols:
+        cn = _norm(c)
+        if any(h in cn for h in entity_hints):
+            targets.append(c)
+    if not targets or not value:
+        return "", {}
+    safe_val = (value or "").replace("'", "")
+    # Try first matching column
+    col = targets[0]
+    # Case-insensitive match for both SQLite and Postgres using LOWER()
+    sql = (
+        f'SELECT * FROM "{table}" '
+        f'WHERE LOWER("{col}") LIKE LOWER('\'%{safe_val}%\'') LIMIT 100'
+    )
+    return sql, {"detected": "equality_filter", "column": col, "value": value}
+
 def answer_query(engine, dataset_id: str, question: str) -> Dict[str, Any]:
     """
     High-level QA/SQL generation + execution. Uses Groq LLM when available.
@@ -358,6 +519,30 @@ def answer_query(engine, dataset_id: str, question: str) -> Dict[str, Any]:
             return result
         except Exception:
             # fall through to LLM
+            pass
+
+    # Try max/min row by metric
+    mm_sql, mm_meta = _max_min_row_sql(question, schema)
+    if mm_sql:
+        try:
+            rows = safe_select(engine, mm_sql)
+            result: Dict[str, Any] = {"answer": "Here are the results.", "sql": mm_sql}
+            if rows:
+                result["table"] = {"columns": list(rows[0].keys()), "rows": rows}
+            return result
+        except Exception:
+            pass
+
+    # Try generic equality filter on common entity columns
+    eq_sql, eq_meta = _equality_filter_sql(question, schema)
+    if eq_sql:
+        try:
+            rows = safe_select(engine, eq_sql)
+            result: Dict[str, Any] = {"answer": "Here are the results.", "sql": eq_sql}
+            if rows:
+                result["table"] = {"columns": list(rows[0].keys()), "rows": rows}
+            return result
+        except Exception:
             pass
 
     # If LLM is available, NEXT try to produce a single safe SQL for any question
